@@ -73,7 +73,11 @@ Copy the contents of `claude_desktop_config.template.json` and merge the `mcpSer
 |---|---|
 | `C:\\PATH\\TO\\python.exe` | Your Python path from Step 4 |
 | `C:\\PATH\\TO\\Odoo Connector\\server.py` | Full path to `server.py` in this folder |
-| `YOUR_EMAIL@visionlighting.net` | Your Odoo login email |
+| `YOUR_STAGING_INSTANCE` | Your staging subdomain (the part before `.dev.odoo.com`) |
+| `YOUR_STAGING_DB` | Your staging database name (usually same as the subdomain) |
+| `YOUR_LIVE_INSTANCE` | Your live subdomain (the part before `.odoo.com`) |
+| `YOUR_LIVE_DB` | Your live database name (ask your Odoo admin if unsure) |
+| `YOUR_EMAIL@yourcompany.com` | Your Odoo login email |
 | `YOUR_STAGING_API_KEY` | API key from the staging instance |
 | `YOUR_LIVE_API_KEY` | API key from the live instance |
 

@@ -6,9 +6,9 @@
         "C:\\PATH\\TO\\Odoo Connector\\server.py"
       ],
       "env": {
-        "ODOO_URL": "https://vision-lighting-staging1-30422128.dev.odoo.com",
-        "ODOO_DB": "vision-lighting-staging1-30422128",
-        "ODOO_USERNAME": "YOUR_EMAIL@visionlighting.net",
+        "ODOO_URL": "https://YOUR_STAGING_INSTANCE.dev.odoo.com",
+        "ODOO_DB": "YOUR_STAGING_DB",
+        "ODOO_USERNAME": "YOUR_EMAIL@yourcompany.com",
         "ODOO_API_KEY": "YOUR_STAGING_API_KEY",
         "ODOO_MODE": "staging"
       }
@@ -19,9 +19,9 @@
         "C:\\PATH\\TO\\Odoo Connector\\server.py"
       ],
       "env": {
-        "ODOO_URL": "https://vision-lighting.odoo.com",
-        "ODOO_DB": "odoo-ps-pshk-vision-lighting-main-21831498",
-        "ODOO_USERNAME": "YOUR_EMAIL@visionlighting.net",
+        "ODOO_URL": "https://YOUR_LIVE_INSTANCE.odoo.com",
+        "ODOO_DB": "YOUR_LIVE_DB",
+        "ODOO_USERNAME": "YOUR_EMAIL@yourcompany.com",
         "ODOO_API_KEY": "YOUR_LIVE_API_KEY",
         "ODOO_MODE": "live_ro"
       }
@@ -32,9 +32,9 @@
         "C:\\PATH\\TO\\Odoo Connector\\server.py"
       ],
       "env": {
-        "ODOO_URL": "https://vision-lighting.odoo.com",
-        "ODOO_DB": "odoo-ps-pshk-vision-lighting-main-21831498",
-        "ODOO_USERNAME": "YOUR_EMAIL@visionlighting.net",
+        "ODOO_URL": "https://YOUR_LIVE_INSTANCE.odoo.com",
+        "ODOO_DB": "YOUR_LIVE_DB",
+        "ODOO_USERNAME": "YOUR_EMAIL@yourcompany.com",
         "ODOO_API_KEY": "YOUR_LIVE_API_KEY",
         "ODOO_MODE": "live_rw"
       }
