@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .claude/
+
+# Generated datasheet outputs (test artifacts)
+*.pdf
+*.zip
+*- Datasheets/

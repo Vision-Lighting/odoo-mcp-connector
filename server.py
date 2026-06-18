@@ -358,6 +358,14 @@ DATASHEET_TOOLS = [
                     "type": "string",
                     "description": f"PDFMonkey template ID override. Defaults to {PDFMONKEY_TEMPLATE_ID}",
                 },
+                "quote_name": {
+                    "type": "string",
+                    "description": "Project/quote name to print on the datasheet (sale.order x_studio_quote_name). Optional — project datasheets only.",
+                },
+                "project_legend": {
+                    "type": "string",
+                    "description": "Project legend/tag for this line (sale.order.line x_studio_project_legend). Optional — project datasheets only.",
+                },
             },
         },
     ),
@@ -684,10 +692,14 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
             variant_id = hits[0]
 
         # 2. Fetch all spec fields (variant level)
+        #    Every field here is an existing Studio (x_studio_*) field on the
+        #    live database — no module-defined fields, so this works whether or
+        #    not the vl_datasheet_pdfmonkey module is installed.
         SPEC_FIELDS = [
             "id", "name", "default_code", "description_sale",
             "product_tmpl_id", "image_1920",
             "product_template_attribute_value_ids",
+            "x_studio_datasheet_description",
             "x_studio_lumens_1",
             "x_studio_ip_rating", "x_studio_ik_rating",
             "x_studio_light_source", "x_studio_lifetime",
@@ -701,24 +713,25 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
             "x_studio_ies_image",
             "x_studio_dimension_image",
             "x_studio_colour_detail",
+            # Emergency (AS2293)
+            "x_studio_emergency_as2293_classification",
+            "x_studio_emergency_duration",
+            "x_studio_emergency_exit_view_distance",
+            "x_studio_emergency_battery_type",
+            "x_studio_emergency_battery_voltage",
+            "x_studio_emergency_charge_time",
         ]
         variants = client.read("product.product", [variant_id], fields=SPEC_FIELDS)
         if not variants:
             return _err(f"Variant ID {variant_id} not found")
         v = variants[0]
 
-        # 2b. Fetch template-level description override (x_datasheet_description, only if module installed)
-        tmpl_id = v["product_tmpl_id"][0] if isinstance(v.get("product_tmpl_id"), list) else v.get("product_tmpl_id")
+        # 2b. Datasheet-specific description comes from the variant's Studio
+        #     field x_studio_datasheet_description (falls back to description_sale below).
         datasheet_description = ""
-        if tmpl_id:
-            try:
-                tmpl_records = client.read("product.template", [tmpl_id], fields=["x_datasheet_description", "description_sale"])
-                if tmpl_records:
-                    t = tmpl_records[0]
-                    datasheet_description = t.get("x_datasheet_description") or t.get("description_sale") or ""
-            except Exception:
-                # x_datasheet_description only exists when vl_datasheet_pdfmonkey module is installed
-                pass
+        _dd = v.get("x_studio_datasheet_description")
+        if _dd:
+            datasheet_description = _dd
 
         def _f(val) -> str:
             if val is False or val is None:
@@ -746,9 +759,8 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
                 known_attrs[attr_name.lower()] = attr_value
 
         # 4. Build the payload (matches template variable structure)
-        description = _f(v.get("description_sale") or datasheet_description)
-        if datasheet_description:
-            description = datasheet_description  # template-level override takes priority
+        #    Datasheet description takes priority, falling back to the sales description.
+        description = _f(datasheet_description or v.get("description_sale"))
 
         payload = {
             "default_code":        _f(v.get("default_code")),
@@ -775,14 +787,21 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
             "height_mm":           _f(v.get("x_studio_height_mm_2")),
             "diameter_mm":         _f(v.get("x_studio_diameter_mm_1")),
             "cutout":              _f(v.get("x_studio_cut_out")),
-            "weight":              _f(v.get("x_studio_weight_kg")),
+            "weight":              _f(v.get("x_studio_weight_kg") or ""),  # 0.0 → "" so an empty weight row is omitted
+            # Emergency (AS2293)
+            "emergency_as2293":             _f(v.get("x_studio_emergency_as2293_classification")),
+            "emergency_duration":           _f(v.get("x_studio_emergency_duration")),
+            "emergency_exit_view_distance": _f(v.get("x_studio_emergency_exit_view_distance")),
+            "emergency_battery_type":       _f(v.get("x_studio_emergency_battery_type")),
+            "emergency_battery_voltage":    _f(v.get("x_studio_emergency_battery_voltage")),
+            "emergency_charge_time":        _f(v.get("x_studio_emergency_charge_time")),
             "notes":               _f(v.get("x_studio_specsheet_notes")),
             "attributes":          attr_vals,
             "product_image":       _to_data_uri(v.get("image_1920")),
             "ies_image":           _to_data_uri(v.get("x_studio_ies_image")),
             "dimension_image":     _to_data_uri(v.get("x_studio_dimension_image")),
-            "quote_name":          "",
-            "project_legend":      "",
+            "quote_name":          _f(args.get("quote_name") or ""),
+            "project_legend":      _f(args.get("project_legend") or ""),
         }
 
         # 5. Submit to PDFMonkey and return result
