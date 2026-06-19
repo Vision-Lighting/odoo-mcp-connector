@@ -30,6 +30,7 @@ LIVE_RW_WRITE_MODELS = {
     "project.project",
     "product.pricelist.item",
     "helpdesk.ticket",
+    "res.partner",
 }
 # Models that live_rw may CREATE in
 LIVE_RW_CREATE_MODELS = {
@@ -37,6 +38,7 @@ LIVE_RW_CREATE_MODELS = {
     "sale.order",
     "product.pricelist.item",
     "helpdesk.ticket",
+    "res.partner",
 }
 
 MODE_LABELS = {
