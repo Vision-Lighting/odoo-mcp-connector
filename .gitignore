@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .claude/
 
+# Build output (shipped as a GitHub Release asset, not committed)
+dist/
+*.mcpb
+
 # Generated datasheet outputs (test artifacts)
 *.pdf
 *.zip

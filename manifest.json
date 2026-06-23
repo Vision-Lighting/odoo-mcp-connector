@@ -1,0 +1,77 @@
+{
+  "manifest_version": "0.2",
+  "name": "odoo-mcp-connector",
+  "display_name": "Vision Lighting Odoo Connector",
+  "version": "2.0.0",
+  "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, project tasks, helpdesk tickets, contacts) and PDFMonkey datasheet generation.",
+  "author": {
+    "name": "Vision Lighting",
+    "email": "calebh@visionlighting.net"
+  },
+  "homepage": "https://github.com/Vision-Lighting/odoo-mcp-connector",
+  "documentation": "https://github.com/Vision-Lighting/odoo-mcp-connector",
+  "keywords": ["odoo", "mcp", "erp", "datasheet", "vision-lighting"],
+  "server": {
+    "type": "python",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "py",
+      "args": ["${__dirname}/_launcher.py"],
+      "env": {
+        "ODOO_MODE": "live_rw",
+        "ODOO_URL": "${user_config.live_url}",
+        "ODOO_DB": "${user_config.live_db}",
+        "ODOO_USERNAME": "${user_config.odoo_username}",
+        "ODOO_API_KEY": "${user_config.live_api_key}",
+        "PDFMONKEY_API_KEY": "${user_config.pdfmonkey_api_key}",
+        "PDFMONKEY_TEMPLATE_ID": "${user_config.pdfmonkey_template_id}"
+      }
+    }
+  },
+  "user_config": {
+    "odoo_username": {
+      "type": "string",
+      "title": "Odoo login email",
+      "description": "Your Odoo login email address.",
+      "required": true
+    },
+    "live_url": {
+      "type": "string",
+      "title": "Odoo URL",
+      "description": "Base URL of the live instance, e.g. https://your-company.odoo.com",
+      "required": true
+    },
+    "live_db": {
+      "type": "string",
+      "title": "Database name",
+      "description": "Live database name (ask your Odoo admin if unsure).",
+      "required": true
+    },
+    "live_api_key": {
+      "type": "string",
+      "title": "Odoo API key",
+      "description": "API key from the live instance (Settings > My Profile > Account Security > API Keys).",
+      "required": true,
+      "sensitive": true
+    },
+    "pdfmonkey_api_key": {
+      "type": "string",
+      "title": "PDFMonkey API key (optional)",
+      "description": "Only needed for datasheet generation. Leave blank otherwise.",
+      "required": false,
+      "sensitive": true
+    },
+    "pdfmonkey_template_id": {
+      "type": "string",
+      "title": "PDFMonkey template ID (optional)",
+      "description": "The PDFMonkey datasheet template ID. Only needed for datasheet generation.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32", "darwin", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

@@ -1,104 +1,64 @@
 # Vision Lighting – Odoo MCP Connector Setup
 
-Connects Claude Desktop to the Vision Lighting Odoo instances with three access modes:
+Connects Claude Desktop to the Vision Lighting **live** Odoo instance as a single
+server:
 
-| Server | Mode | What you can do |
-|---|---|---|
-| `odoo-staging` | 🧪 Staging | Everything — safe to experiment |
-| `odoo-live-ro` | 🔵 Live read-only | Search and read anything, zero writes |
-| `odoo-live-rw` | 🟠 Live restricted | Read everything + edit products/variants/images + create/edit project tasks + update pricelists |
+- **Read** anything (products, sales orders, partners, etc.)
+- **Restricted writes** — products, variants, images, pricelists, project tasks,
+  helpdesk tickets, and contacts (the write allowlist lives in `server.py`)
+- **PDFMonkey** datasheet generation
+
+> The old staging and separate read-only servers have been retired — there is now
+> one live read-write server.
 
 ---
 
-## Prerequisites
+## Recommended: install the `.mcpb` bundle (one click)
 
+This is the easiest way and needs no manual `pip install`.
+
+### Prerequisites
 - [Claude Desktop](https://claude.ai/download) installed
-- Python 3.10+ installed — download from https://www.python.org/downloads/
+- Python 3.10+ on your PATH — install from https://www.python.org/downloads/
+  and tick **"Add Python to PATH"**. Verify with `py --version` in a terminal.
+
+### Steps
+1. Download **`odoo-mcp-connector.mcpb`** from the
+   [latest release](https://github.com/Vision-Lighting/odoo-mcp-connector/releases/latest).
+   (Do **not** use the green "Code → Download ZIP" — that's the source, not the bundle.)
+2. In Claude Desktop, open **Settings → Extensions** and drag the `.mcpb` file in
+   (or **Advanced → Install Extension** and select it).
+3. When prompted, enter:
+   - **Odoo login email**
+   - **Odoo URL** — e.g. `https://your-company.odoo.com`
+   - **Database name**
+   - **Odoo API key** — see *Get your API key* below
+   - PDFMonkey API key + template ID are optional (only for datasheets)
+4. Enable the extension. On first launch it auto-creates a private virtual
+   environment and installs its dependencies — this takes a few seconds.
+5. Test it: ask Claude *"Ping Odoo"*. You should get back your username and the
+   server version.
+
+### Get your API key
+1. Log in to Odoo → **Settings → My Profile** (top-right menu)
+2. **Account Security** tab → **API Keys** → **New Key**
+3. Name it (e.g. "Claude Desktop") and copy the key — you won't see it again
 
 ---
 
-## Step 1 — Copy the files
+## Alternative: manual config (advanced / Claude Code)
 
-Copy this entire `Odoo Connector` folder to your machine, e.g.:
-```
-C:\Users\YOUR_NAME\Odoo Connector\
-```
+If you'd rather wire it up by hand (e.g. for Claude Code, or to run from source):
 
----
-
-## Step 2 — Install Python dependencies
-
-Open a terminal (Command Prompt or PowerShell) in the folder and run:
-
-```
-py -m pip install mcp python-dotenv openpyxl requests
-```
-
----
-
-## Step 3 — Get your Odoo API key
-
-You need a separate API key for staging and live (or you can use one key for both).
-
-1. Log in to the Odoo instance (staging or live)
-2. Go to **Settings → My Profile** (top-right menu)
-3. Click the **Account Security** tab
-4. Under **API Keys**, click **New Key**
-5. Give it a name (e.g. "Claude Desktop") and copy the key — you won't see it again
-
-Repeat for the other instance if you want both modes.
-
----
-
-## Step 4 — Find your Python path
-
-In a terminal, run:
-```
-py -c "import sys; print(sys.executable)"
-```
-Copy the output — you'll need it in the next step.
-
----
-
-## Step 5 — Configure Claude Desktop
-
-Open (or create) the Claude Desktop config file at:
-```
-C:\Users\YOUR_NAME\AppData\Roaming\Claude\claude_desktop_config.json
-```
-
-Copy the contents of `claude_desktop_config.template.json` and merge the `mcpServers` block into your config. Then replace:
-
-| Placeholder | Replace with |
-|---|---|
-| `C:\\PATH\\TO\\python.exe` | Your Python path from Step 4 |
-| `C:\\PATH\\TO\\Odoo Connector\\server.py` | Full path to `server.py` in this folder |
-| `YOUR_STAGING_INSTANCE` | Your staging subdomain (the part before `.dev.odoo.com`) |
-| `YOUR_STAGING_DB` | Your staging database name (usually same as the subdomain) |
-| `YOUR_LIVE_INSTANCE` | Your live subdomain (the part before `.odoo.com`) |
-| `YOUR_LIVE_DB` | Your live database name (ask your Odoo admin if unsure) |
-| `YOUR_EMAIL@yourcompany.com` | Your Odoo login email |
-| `YOUR_STAGING_API_KEY` | API key from the staging instance |
-| `YOUR_LIVE_API_KEY` | API key from the live instance |
-
-> **Note:** Use double backslashes `\\` in all Windows paths inside the JSON.
-
----
-
-## Step 6 — Restart Claude Desktop
-
-Fully quit Claude Desktop via the **system tray** (bottom-right `^` → right-click Claude → **Quit**), then reopen it.
-
-You should see three Odoo tools appear in Claude with a 🔨 icon.
-
----
-
-## Step 7 — Test the connection
-
-In Claude Desktop, ask:
-> "Ping odoo-staging"
-
-You should get back your username and server version confirming the connection.
+1. Copy this folder to your machine and install deps:
+   ```
+   py -m pip install -r requirements.txt
+   ```
+2. Find your Python path: `py -c "import sys; print(sys.executable)"`
+3. Merge `claude_desktop_config.template.json` into your Claude Desktop config at
+   `C:\Users\YOUR_NAME\AppData\Roaming\Claude\claude_desktop_config.json`, filling
+   in the placeholders (use double backslashes `\\` in Windows paths).
+4. Fully quit Claude Desktop from the system tray, then reopen it.
 
 ---
 
@@ -106,8 +66,12 @@ You should get back your username and server version confirming the connection.
 
 | File | Purpose |
 |---|---|
-| `server.py` | MCP server — all tools and access control logic |
+| `manifest.json` | MCPB bundle manifest (servers, install-time config prompts) |
+| `_launcher.py` | First-run bootstrap — builds a private venv and installs deps |
+| `build_mcpb.py` | Builds `dist/odoo-mcp-connector.mcpb` |
+| `server.py` | MCP server — all tools and the write allowlist |
 | `odoo_client.py` | Odoo XML-RPC client wrapper |
-| `claude_desktop_config.template.json` | Config template (fill in your details) |
+| `pdfmonkey_client.py` | PDFMonkey datasheet client |
+| `claude_desktop_config.template.json` | Manual-config template (advanced) |
 | `requirements.txt` | Python dependencies |
-| `.env.example` | Alternative: set credentials via .env file |
+| `.env.example` | Alternative: set credentials via a `.env` file |

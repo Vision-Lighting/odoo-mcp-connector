@@ -1,13 +1,14 @@
-"""Build the uploadable plugin zip.
+"""Build the installable MCPB bundle.
 
-Produces dist/odoo-mcp-connector.zip with the layout the Claude plugin
-uploader requires: `.claude-plugin/plugin.json` at the ZIP ROOT (no wrapper
-folder). Run this after editing any plugin file:
+Produces dist/odoo-mcp-connector.mcpb — an MCP Bundle (a zip with manifest.json
+at the root) that installs into Claude Desktop via Settings > Extensions (or by
+dragging the file in). One server, live read-write mode (full read + the write
+allowlist in server.py).
 
-    py build_plugin.py
+    py build_mcpb.py
 
-Then upload dist/odoo-mcp-connector.zip via Claude > Customize > Personal
-plugins > Create plugin > Upload plugin (or attach it to a GitHub Release).
+Validate/inspect the result with the official CLI:
+    npx -y @anthropic-ai/mcpb@latest info dist/odoo-mcp-connector.mcpb
 """
 
 import zipfile
@@ -15,17 +16,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-OUT = DIST / "odoo-mcp-connector.zip"
+OUT = DIST / "odoo-mcp-connector.mcpb"
 
-# Files shipped inside the plugin, mapped to their path within the zip.
+# Files shipped inside the bundle. manifest.json MUST be at the zip root.
 INCLUDE = [
-    ".claude-plugin/plugin.json",
+    "manifest.json",
     "_launcher.py",
     "server.py",
     "odoo_client.py",
     "pdfmonkey_client.py",
     "requirements.txt",
-    "SETUP.md",
 ]
 
 
