@@ -31,15 +31,25 @@ LIVE_RW_WRITE_MODELS = {
     "product.pricelist.item",
     "helpdesk.ticket",
     "res.partner",
+    # sale.order / sale.order.line writes are additionally gated by _quote_guard
+    # to the quotation stage only (see QUOTE_STATES) — confirmed sales orders
+    # are read-only here.
+    "sale.order",
+    "sale.order.line",
 }
 # Models that live_rw may CREATE in
 LIVE_RW_CREATE_MODELS = {
     "project.task",
     "sale.order",
+    "sale.order.line",
     "product.pricelist.item",
     "helpdesk.ticket",
     "res.partner",
 }
+
+# sale.order states that count as an editable "quote". Anything else (sale =
+# confirmed Sales Order, cancel, etc.) is locked down in live_rw mode.
+QUOTE_STATES = {"draft", "sent"}
 
 MODE_LABELS = {
     "staging":  "🧪 STAGING",
@@ -63,6 +73,52 @@ def _denied(action: str) -> list[TextContent]:
         f"Action '{action}' is not permitted in {MODE_LABELS[MODE]} mode. "
         f"Switch to the staging server to perform this operation."
     )
+
+
+def _quote_guard(model: str, ids: list[int] | None = None, values: dict | None = None) -> str | None:
+    """Restrict live_rw sale.order(.line) writes/creates to the quotation stage.
+
+    Returns an error message string when the operation must be blocked, or None
+    when it is allowed. Enforces two rules for live_rw:
+      1. The affected sale.order(s) must be in a quote state (draft/sent) — a
+         confirmed Sales Order (or cancelled order) cannot be edited here.
+      2. A sale.order's `state` may not be set to anything outside QUOTE_STATES,
+         so a quote can never be confirmed/locked into a Sales Order from here.
+    """
+    if MODE != "live_rw" or model not in ("sale.order", "sale.order.line"):
+        return None
+
+    # Collect the parent sale.order ids implicated by this operation.
+    order_ids: list[int] = []
+    if model == "sale.order":
+        order_ids = list(ids or [])
+    elif model == "sale.order.line":
+        if ids:
+            for line in client.read("sale.order.line", list(ids), ["order_id"]):
+                if line.get("order_id"):
+                    order_ids.append(line["order_id"][0])
+        if values and values.get("order_id"):
+            order_ids.append(values["order_id"])
+
+    if order_ids:
+        for order in client.read("sale.order", order_ids, ["name", "state"]):
+            if order.get("state") not in QUOTE_STATES:
+                return (
+                    f"Sale order {order.get('name')} (id {order['id']}) is in state "
+                    f"'{order.get('state')}', past the quotation stage. "
+                    f"{MODE_LABELS[MODE]} mode may only edit quotes "
+                    f"(state draft or sent)."
+                )
+
+    # Never allow a direct state change that would confirm/lock a quote.
+    if model == "sale.order" and values and "state" in values \
+            and values["state"] not in QUOTE_STATES:
+        return (
+            f"Setting sale.order state to '{values['state']}' is not permitted in "
+            f"{MODE_LABELS[MODE]} mode — quotes cannot be converted to sales orders "
+            f"here."
+        )
+    return None
 
 
 # ── URL helpers ───────────────────────────────────────────────────────────────
@@ -224,6 +280,9 @@ WRITE_TOOLS = [
         description=(
             f"[{MODE_LABELS[MODE]}] Update Odoo records. "
             + ("Allowed models: " + ", ".join(sorted(LIVE_RW_WRITE_MODELS))
+               + ". Note: sale.order / sale.order.line edits are limited to the "
+               "quotation stage (draft/sent); confirmed sales orders are read-only "
+               "and quotes cannot be confirmed into sales orders here."
                if MODE == "live_rw" else "Any model.")
         ),
         inputSchema={
@@ -551,6 +610,9 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
                 f"Cannot create '{model}' in {MODE_LABELS[MODE]} mode. "
                 f"Allowed: {', '.join(sorted(LIVE_RW_CREATE_MODELS))}"
             )
+        guard_err = _quote_guard(model, values=args["values"])
+        if guard_err:
+            return _err(guard_err)
         new_id = client.create(model, args["values"])
         return _ok({"id": new_id, "model": model, "url": record_url(model, new_id)})
 
@@ -561,6 +623,9 @@ async def _dispatch(name: str, args: dict) -> list[TextContent]:
                 f"Cannot write to '{model}' in {MODE_LABELS[MODE]} mode. "
                 f"Allowed: {', '.join(sorted(LIVE_RW_WRITE_MODELS))}"
             )
+        guard_err = _quote_guard(model, ids=args["ids"], values=args.get("values"))
+        if guard_err:
+            return _err(guard_err)
         ok = client.write(model, args["ids"], args["values"])
         return _ok({
             "success": ok,
