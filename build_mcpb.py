@@ -2,8 +2,9 @@
 
 Produces dist/odoo-mcp-connector.mcpb — an MCP Bundle (a zip with manifest.json
 at the root) that installs into Claude Desktop via Settings > Extensions (or by
-dragging the file in). One server, live read-write mode (full read + the write
-allowlist in server.py).
+dragging the file in). The server is a zero-dependency Node.js script, so it
+runs on the Node runtime bundled with Claude Desktop — users need nothing
+installed.
 
     py build_mcpb.py
 
@@ -21,11 +22,7 @@ OUT = DIST / "odoo-mcp-connector.mcpb"
 # Files shipped inside the bundle. manifest.json MUST be at the zip root.
 INCLUDE = [
     "manifest.json",
-    "_launcher.py",
-    "server.py",
-    "odoo_client.py",
-    "pdfmonkey_client.py",
-    "requirements.txt",
+    "server/index.js",
 ]
 
 

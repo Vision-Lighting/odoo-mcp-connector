@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "odoo-mcp-connector",
   "display_name": "Vision Lighting Odoo Connector",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, project tasks, helpdesk tickets, contacts) and PDFMonkey datasheet generation.",
   "author": {
     "name": "Vision Lighting",
@@ -12,11 +12,11 @@
   "documentation": "https://github.com/Vision-Lighting/odoo-mcp-connector",
   "keywords": ["odoo", "mcp", "erp", "datasheet", "vision-lighting"],
   "server": {
-    "type": "python",
-    "entry_point": "server.py",
+    "type": "node",
+    "entry_point": "server/index.js",
     "mcp_config": {
-      "command": "py",
-      "args": ["${__dirname}/_launcher.py"],
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
       "env": {
         "ODOO_MODE": "live_rw",
         "ODOO_URL": "${user_config.live_url}",
@@ -71,7 +71,7 @@
   "compatibility": {
     "platforms": ["win32", "darwin", "linux"],
     "runtimes": {
-      "python": ">=3.10"
+      "node": ">=18"
     }
   }
 }
