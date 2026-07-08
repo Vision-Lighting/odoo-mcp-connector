@@ -17,18 +17,22 @@
 
 const readline = require('node:readline');
 
-const SERVER_VERSION = '3.0.0';
+const SERVER_VERSION = '3.0.1';
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
-const ODOO_URL = (process.env.ODOO_URL || '').replace(/\/+$/, '');
-const ODOO_DB = process.env.ODOO_DB || '';
-const ODOO_USERNAME = process.env.ODOO_USERNAME || '';
-const ODOO_API_KEY = process.env.ODOO_API_KEY || '';
-const MODE = process.env.ODOO_MODE || 'live_rw'; // staging | live_ro | live_rw
+// Trim every value — a stray space or newline pasted into the install dialog
+// otherwise reaches Odoo verbatim and fails auth with a bare "Access Denied".
+const env = (key) => (process.env[key] || '').trim();
 
-const PDFMONKEY_API_KEY = process.env.PDFMONKEY_API_KEY || '';
-const PDFMONKEY_TEMPLATE_ID = process.env.PDFMONKEY_TEMPLATE_ID || '';
+const ODOO_URL = env('ODOO_URL').replace(/\/+$/, '');
+const ODOO_DB = env('ODOO_DB');
+const ODOO_USERNAME = env('ODOO_USERNAME');
+const ODOO_API_KEY = env('ODOO_API_KEY');
+const MODE = env('ODOO_MODE') || 'live_rw'; // staging | live_ro | live_rw
+
+const PDFMONKEY_API_KEY = env('PDFMONKEY_API_KEY');
+const PDFMONKEY_TEMPLATE_ID = env('PDFMONKEY_TEMPLATE_ID');
 
 for (const [k, v] of Object.entries({ ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_API_KEY })) {
   if (!v) process.stderr.write(`[odoo-mcp] WARNING: ${k} is not set — tools will fail until configured.\n`);

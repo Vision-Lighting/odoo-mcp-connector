@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "odoo-mcp-connector",
   "display_name": "Vision Lighting Odoo Connector",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, project tasks, helpdesk tickets, contacts) and PDFMonkey datasheet generation.",
   "author": {
     "name": "Vision Lighting",
@@ -32,7 +32,7 @@
     "odoo_username": {
       "type": "string",
       "title": "Odoo login email",
-      "description": "Your Odoo login email address.",
+      "description": "Your Odoo login email EXACTLY as it appears in Odoo — logins are case-sensitive (e.g. JoshS@... will not work typed as joshs@...). Check Odoo > Settings > My Profile if unsure.",
       "required": true
     },
     "live_url": {
