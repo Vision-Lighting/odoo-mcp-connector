@@ -17,7 +17,7 @@
 
 const readline = require('node:readline');
 
-const SERVER_VERSION = '3.0.1';
+const SERVER_VERSION = '3.1.0';
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
@@ -142,6 +142,11 @@ const odoo = {
   },
   write(model, ids, values) {
     return execute(model, 'write', [ids, values]);
+  },
+  // Deliberately not exposed as a generic tool — only quote_update uses it,
+  // and only on sale.order.line ids verified to belong to a quote-stage order.
+  unlink(model, ids) {
+    return execute(model, 'unlink', [ids]);
   },
   getFields(model, attributes) {
     const kwargs = {};
@@ -553,6 +558,64 @@ const WRITE_TOOLS = [
         values: { type: 'object' },
       },
       required: ['variant_id', 'values'],
+    },
+  },
+  {
+    name: 'quote_update',
+    description:
+      `[${MODE_LABEL}] Edit an existing QUOTATION (sale.order in draft/sent state) in one call: ` +
+      'update header fields and add, update, or remove order lines. ' +
+      'Refuses confirmed sales orders in every mode, and can never confirm a quote ' +
+      'into a sales order — confirmation stays a manual step in Odoo. ' +
+      'Returns the updated order with all lines so the result can be verified.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        order_id: { type: 'integer', description: 'sale.order ID of the quotation' },
+        values: {
+          type: 'object',
+          description:
+            "Header fields to update, e.g. partner_id, validity_date, note, client_order_ref, " +
+            "Studio fields (x_studio_*). 'state' may only be 'draft' or 'sent'.",
+        },
+        add_lines: {
+          type: 'array',
+          description: 'New order lines to add',
+          items: {
+            type: 'object',
+            properties: {
+              product_id: { type: 'integer', description: 'product.product (variant) ID' },
+              quantity: { type: 'number', description: 'Quantity (product_uom_qty)' },
+              price_unit: { type: 'number', description: 'Unit price (omit to use pricelist price)' },
+              description: { type: 'string', description: 'Line description (omit to use product default)' },
+              extra_fields: { type: 'object', description: 'Any additional/Studio fields, e.g. x_studio_project_legend' },
+            },
+            required: ['product_id'],
+          },
+        },
+        update_lines: {
+          type: 'array',
+          description: 'Existing order lines to change (find line IDs via sales_order_get)',
+          items: {
+            type: 'object',
+            properties: {
+              line_id: { type: 'integer', description: 'sale.order.line ID' },
+              product_id: { type: 'integer' },
+              quantity: { type: 'number', description: 'New quantity (product_uom_qty)' },
+              price_unit: { type: 'number' },
+              description: { type: 'string', description: 'New line description' },
+              extra_fields: { type: 'object', description: 'Any additional/Studio fields' },
+            },
+            required: ['line_id'],
+          },
+        },
+        remove_line_ids: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'sale.order.line IDs to delete from the quote',
+        },
+      },
+      required: ['order_id'],
     },
   },
   {
@@ -1022,6 +1085,80 @@ async function dispatch(name, args) {
       variant_id: args.variant_id,
       url: recordUrl('product.product', args.variant_id),
     });
+  }
+
+  if (name === 'quote_update') {
+    const orderId = args.order_id;
+
+    // Quote-stage gate applies in EVERY mode for this tool: it exists to edit
+    // quotations, so confirmed/cancelled orders are always off limits here.
+    const orders = await odoo.read('sale.order', [orderId], ['name', 'state']);
+    if (!orders.length) return err(`sale.order ${orderId} not found`);
+    const orderRef = orders[0];
+    if (!QUOTE_STATES.has(orderRef.state)) {
+      return err(
+        `Sale order ${orderRef.name} (id ${orderId}) is in state '${orderRef.state}', ` +
+        "past the quotation stage. quote_update may only edit quotes (state draft or sent).",
+      );
+    }
+    if (args.values && 'state' in args.values && !QUOTE_STATES.has(args.values.state)) {
+      return err(
+        `Setting state to '${args.values.state}' is not permitted — quotes cannot be ` +
+        'confirmed into sales orders from this connector. Confirm manually in Odoo.',
+      );
+    }
+
+    // Every referenced line must belong to this order before anything is written.
+    const touchedLineIds = [
+      ...(args.update_lines || []).map((l) => l.line_id),
+      ...(args.remove_line_ids || []),
+    ];
+    if (touchedLineIds.length) {
+      const lines = await odoo.read('sale.order.line', touchedLineIds, ['order_id']);
+      const wrong = lines.filter((l) => !l.order_id || l.order_id[0] !== orderId);
+      if (wrong.length) {
+        return err(
+          `Line id(s) ${wrong.map((l) => l.id).join(', ')} do not belong to ` +
+          `sale.order ${orderId} — refusing to touch them.`,
+        );
+      }
+    }
+
+    const lineValues = (line) => {
+      const vals = {};
+      if ('product_id' in line) vals.product_id = line.product_id;
+      if ('quantity' in line) vals.product_uom_qty = line.quantity;
+      if ('price_unit' in line) vals.price_unit = line.price_unit;
+      if ('description' in line) vals.name = line.description;
+      if (line.extra_fields) Object.assign(vals, line.extra_fields);
+      return vals;
+    };
+
+    const changes = { header_updated: false, lines_added: [], lines_updated: [], lines_removed: [] };
+
+    if (args.values && Object.keys(args.values).length) {
+      await odoo.write('sale.order', [orderId], args.values);
+      changes.header_updated = true;
+    }
+    for (const line of args.update_lines || []) {
+      await odoo.write('sale.order.line', [line.line_id], lineValues(line));
+      changes.lines_updated.push(line.line_id);
+    }
+    for (const line of args.add_lines || []) {
+      changes.lines_added.push(
+        await odoo.create('sale.order.line', { order_id: orderId, ...lineValues(line) }),
+      );
+    }
+    if (args.remove_line_ids && args.remove_line_ids.length) {
+      await odoo.unlink('sale.order.line', args.remove_line_ids);
+      changes.lines_removed = args.remove_line_ids;
+    }
+
+    const order = withUrl(await odoo.getSaleOrder(orderId), 'sale.order');
+    const lines = await odoo.searchRead('sale.order.line', [['order_id', '=', orderId]], {
+      fields: ['id', 'product_id', 'product_uom_qty', 'price_unit', 'price_subtotal', 'name'],
+    });
+    return ok({ ...changes, order, lines });
   }
 
   if (name === 'task_upsert') {
