@@ -49,6 +49,7 @@ const LIVE_RW_WRITE_MODELS = new Set([
   'product.pricelist.item',
   'helpdesk.ticket',
   'res.partner',
+  'mrp.bom',
   // sale.order / sale.order.line writes are additionally gated by quoteGuard
   // to the quotation stage only (see QUOTE_STATES) — confirmed sales orders
   // are read-only here.
@@ -64,6 +65,7 @@ const LIVE_RW_CREATE_MODELS = new Set([
   'product.pricelist.item',
   'helpdesk.ticket',
   'res.partner',
+  'mrp.bom',
 ]);
 
 // sale.order states that count as an editable "quote". Anything else (sale =
