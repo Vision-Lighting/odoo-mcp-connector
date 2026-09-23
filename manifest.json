@@ -2,8 +2,8 @@
   "manifest_version": "0.2",
   "name": "odoo-mcp-connector",
   "display_name": "Vision Lighting Odoo Connector",
-  "version": "3.1.0",
-  "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, quotations, project tasks, helpdesk tickets, contacts) and PDFMonkey datasheet generation. Quotation edits are limited to draft/sent orders; confirming a quote into a sales order stays manual.",
+  "version": "3.2.0",
+  "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, quotations, project tasks, helpdesk tickets, contacts, and ETA dates on purchase orders, PO lines, transfers and transfer lines) and PDFMonkey datasheet generation. Quotation edits are limited to draft/sent orders; confirming a quote into a sales order stays manual. Purchasing and transfer edits are date-only.",
   "author": {
     "name": "Vision Lighting",
     "email": "calebh@visionlighting.net"

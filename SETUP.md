@@ -7,6 +7,9 @@ server:
 - **Restricted writes** — products, variants, images, pricelists, project tasks,
   helpdesk tickets, contacts, and quote-stage sales orders (the write allowlist
   lives in `server/index.js`)
+- **ETA dates only** on purchase orders, PO lines, transfers and transfer lines —
+  Expected Arrival, Ex-works Factory Date and Scheduled Date. No other field on
+  those records can be changed, and cancelled POs / done transfers are locked
 - **PDFMonkey** datasheet generation
 
 The server is a single zero-dependency Node.js script that runs on the Node

@@ -10,14 +10,15 @@
  *   staging  — full access, staging database
  *   live_ro  — read-only, live database
  *   live_rw  — restricted writes (products, quotes, project tasks,
- *              helpdesk tickets, contacts), live database
+ *              helpdesk tickets, contacts, date-only ETA edits on POs
+ *              and transfers), live database
  */
 
 'use strict';
 
 const readline = require('node:readline');
 
-const SERVER_VERSION = '3.1.0';
+const SERVER_VERSION = '3.2.0';
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
@@ -54,7 +55,23 @@ const LIVE_RW_WRITE_MODELS = new Set([
   // are read-only here.
   'sale.order',
   'sale.order.line',
+  // Purchasing ETA updates. These are DATE-ONLY: dateGuard rejects any write
+  // that touches a field outside LIVE_RW_DATE_FIELDS.
+  'purchase.order',
+  'purchase.order.line',
+  'stock.picking',
+  'stock.move',
 ]);
+
+// The only fields live_rw may write on the purchasing/transfer models. Kept to
+// the dates someone actually updates for an ETA — not date_order (it drives the
+// PO's currency rate) nor the transfer's creation/done dates, which are history.
+const LIVE_RW_DATE_FIELDS = {
+  'purchase.order': new Set(['date_planned']),                         // Expected Arrival
+  'purchase.order.line': new Set(['date_planned', 'vl_exworks_date']), // Expected Arrival, Ex-works Factory Date
+  'stock.picking': new Set(['scheduled_date']),                        // Scheduled Date
+  'stock.move': new Set(['date']),                                     // Date Scheduled
+};
 
 // Models that live_rw may CREATE in
 const LIVE_RW_CREATE_MODELS = new Set([
@@ -345,6 +362,46 @@ async function quoteGuard(model, ids = null, values = null) {
   return null;
 }
 
+// Date-only writes to POs, PO lines, transfers and transfer lines. Rejects any
+// other field, and any record that is cancelled or (for transfers) already
+// done — an arrival that has happened is history, not an ETA.
+async function dateGuard(model, ids = null, values = null) {
+  if (MODE !== 'live_rw' || !LIVE_RW_DATE_FIELDS[model]) return null;
+
+  const allowed = LIVE_RW_DATE_FIELDS[model];
+  const bad = Object.keys(values || {}).filter((k) => !allowed.has(k));
+  if (bad.length || !Object.keys(values || {}).length) {
+    return (
+      `${MODE_LABEL} mode may only change date fields on ${model} ` +
+      `(${[...allowed].join(', ')}). Not permitted: ${bad.join(', ') || '(no fields given)'}.`
+    );
+  }
+  if (!ids || !ids.length) return `No ${model} ids given.`;
+
+  if (model === 'purchase.order' || model === 'purchase.order.line') {
+    let orderIds = [...ids];
+    if (model === 'purchase.order.line') {
+      const lines = await odoo.read('purchase.order.line', [...ids], ['order_id']);
+      orderIds = lines.filter((l) => l.order_id).map((l) => l.order_id[0]);
+    }
+    const orders = await odoo.read('purchase.order', [...new Set(orderIds)], ['name', 'state']);
+    for (const po of orders) {
+      if (po.state === 'cancel' || po.state === 'done') {
+        return `Purchase order ${po.name} (id ${po.id}) is '${po.state}' — its dates cannot be changed here.`;
+      }
+    }
+  } else {
+    const label = model === 'stock.picking' ? 'name' : 'reference';
+    const recs = await odoo.read(model, [...ids], [label, 'state']);
+    for (const r of recs) {
+      if (r.state === 'done' || r.state === 'cancel') {
+        return `${model} ${r[label] || r.id} is '${r.state}' — its dates cannot be changed here.`;
+      }
+    }
+  }
+  return null;
+}
+
 // ── URL helpers ───────────────────────────────────────────────────────────────
 
 // Odoo 18 clean URL patterns (falls back to /web# for unknown models)
@@ -501,7 +558,12 @@ const WRITE_TOOLS = [
         ? 'Allowed models: ' + [...LIVE_RW_WRITE_MODELS].sort().join(', ') +
           '. Note: sale.order / sale.order.line edits are limited to the ' +
           'quotation stage (draft/sent); confirmed sales orders are read-only ' +
-          'and quotes cannot be confirmed into sales orders here.'
+          'and quotes cannot be confirmed into sales orders here. ' +
+          'purchase.order, purchase.order.line, stock.picking and stock.move ' +
+          'are DATE-ONLY: ' +
+          Object.entries(LIVE_RW_DATE_FIELDS)
+            .map(([m, f]) => `${m} [${[...f].join(', ')}]`).join('; ') +
+          ' — not on cancelled POs or done/cancelled transfers.'
         : 'Any model.'),
     inputSchema: {
       type: 'object',
@@ -1030,7 +1092,8 @@ async function dispatch(name, args) {
         `Allowed: ${[...LIVE_RW_WRITE_MODELS].sort().join(', ')}`,
       );
     }
-    const guardErr = await quoteGuard(model, args.ids, args.values);
+    const guardErr = (await quoteGuard(model, args.ids, args.values))
+                  || (await dateGuard(model, args.ids, args.values));
     if (guardErr) return err(guardErr);
     const okFlag = await odoo.write(model, args.ids, args.values);
     return ok({
