@@ -10,6 +10,7 @@
  *   staging  — full access, staging database
  *   live_ro  — read-only, live database
  *   live_rw  — restricted writes (products, quotes, project tasks,
+ *              luminaire schedules,
  *              helpdesk tickets, contacts, open manufacturing orders,
  *              date-only ETA edits on POs and transfers),
  *              live database
@@ -1011,14 +1012,23 @@ const STAGING_ONLY_TOOLS = [
       required: ['picking_id', 'batches'],
     },
   },
-  // Luminaire schedules (vl_luminaire_schedule). Staging-only until the module
-  // is installed on live. Each of these moves file bytes itself - reading a
+];
+
+// --- Luminaire schedule tools (vl_luminaire_schedule) ---
+// Live-capable from v3.7.0: the module is installed on live, and these tools only
+// touch the schedule models (the import wizard, schedule lines' specified image,
+// source documents) - never quotes, products or stock. Available on live in
+// live_rw mode; in live_ro they stay staging-only, like the other write paths.
+const SCHEDULE_LIVE = MODE === 'live_rw' || MODE === 'staging';
+const SCHEDULE_LABEL = SCHEDULE_LIVE ? MODE_LABEL : MODE_LABELS.staging;
+const SCHEDULE_TOOLS = [
+  // Each of these moves file bytes itself - reading a
   // local file or downloading a link - so an image or a whole schedule never
   // has to be written out inside the tool call.
   {
     name: 'schedule_import_file',
     description:
-      '[🧪 STAGING] File a comparison record as a luminaire schedule, images included. ' +
+      `[${SCHEDULE_LABEL}] ` + 'File a comparison record as a luminaire schedule, images included. ' +
       'Pass the local path to the review .html (render_html.py output - carries every image) ' +
       'or the .comparison.json (imports without images). mode "create" makes a new schedule; ' +
       'mode "images" adds the specified images to an existing schedule_id, matching lines on legend.',
@@ -1037,7 +1047,7 @@ const STAGING_ONLY_TOOLS = [
   {
     name: 'schedule_set_image',
     description:
-      '[🧪 STAGING] Set the specified image on one luminaire-schedule line from a web link or a ' +
+      `[${SCHEDULE_LABEL}] ` + 'Set the specified image on one luminaire-schedule line from a web link or a ' +
       'local file. The connector fetches or reads it. SharePoint links need a login and will not ' +
       'download - use the synced local path instead.',
     inputSchema: {
@@ -1053,7 +1063,7 @@ const STAGING_ONLY_TOOLS = [
   {
     name: 'schedule_add_source_document',
     description:
-      '[🧪 STAGING] Attach a source document to a luminaire schedule - normally the specified ' +
+      `[${SCHEDULE_LABEL}] ` + 'Attach a source document to a luminaire schedule - normally the specified ' +
       'luminaire schedule it was built against (is_basis true). Prefer url (the SharePoint link, ' +
       'one copy of record); file_path uploads a local file instead.',
     inputSchema: {
@@ -1085,9 +1095,9 @@ const STAGING_ONLY_TOOLS = [
 // does not name target 'staging'.
 let ALL_TOOLS;
 if (MODE === 'staging') {
-  ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, ...DATASHEET_TOOLS, ...STAGING_ONLY_TOOLS];
+  ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, ...DATASHEET_TOOLS, ...SCHEDULE_TOOLS, ...STAGING_ONLY_TOOLS];
 } else if (MODE === 'live_rw') {
-  ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, ...DATASHEET_TOOLS];
+  ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, ...DATASHEET_TOOLS, ...SCHEDULE_TOOLS];
 } else {
   // live_ro
   ALL_TOOLS = [...READ_TOOLS, ...DATASHEET_TOOLS];
@@ -1098,6 +1108,7 @@ if (HAS_STAGING && MODE !== 'staging') {
   // off MODE === 'live_rw', so in live_ro they would wave a live write through
   // as well. Read-only stays read-only, on both databases.
   ALL_TOOLS = [...ALL_TOOLS, ...STAGING_ONLY_TOOLS];
+  if (!SCHEDULE_LIVE) ALL_TOOLS = [...ALL_TOOLS, ...SCHEDULE_TOOLS];
 }
 // Every tool takes an optional target once a staging database is configured.
 // Declared here rather than on 40 individual schemas so the two can never
@@ -1119,7 +1130,10 @@ if (HAS_STAGING) {
   }
 }
 const ALLOWED_TOOL_NAMES = new Set(ALL_TOOLS.map((t) => t.name));
-const STAGING_ONLY_TOOL_NAMES = new Set(STAGING_ONLY_TOOLS.map((t) => t.name));
+const STAGING_ONLY_TOOL_NAMES = new Set([
+  ...STAGING_ONLY_TOOLS,
+  ...(SCHEDULE_LIVE ? [] : SCHEDULE_TOOLS),
+].map((t) => t.name));
 
 // ── Datasheet helpers ─────────────────────────────────────────────────────────
 
@@ -1564,7 +1578,7 @@ async function dispatch(name, args) {
     return generateDatasheet(args);
   }
 
-  // ── Staging-only tools ──────────────────────────────────────────────────────
+  // ── Luminaire schedule tools ────────────────────────────────────────────────
   if (name === 'schedule_import_file') {
     const file = readLocalFile(args.file_path, SCHEDULE_FILE_EXTS, 80);
     const mode = args.mode === 'images' ? 'images' : 'create';
@@ -1650,6 +1664,7 @@ async function dispatch(name, args) {
       url: recordUrl('vl.luminaire.schedule', args.schedule_id) });
   }
 
+  // ── Staging-only tools ──────────────────────────────────────────────────────
   if (name === 'odoo_call') {
     return ok(await odoo.call(args.model, args.method, args.ids, args.kwargs || {}));
   }
