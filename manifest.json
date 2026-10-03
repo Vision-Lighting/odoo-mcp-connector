@@ -2,21 +2,29 @@
   "manifest_version": "0.2",
   "name": "odoo-mcp-connector",
   "display_name": "Vision Lighting Odoo Connector",
-  "version": "3.2.0",
-  "description": "Connects Claude to the Vision Lighting live Odoo instance — read everything, plus restricted writes (products, variants, images, pricelists, quotations, project tasks, helpdesk tickets, contacts, and ETA dates on purchase orders, PO lines, transfers and transfer lines) and PDFMonkey datasheet generation. Quotation edits are limited to draft/sent orders; confirming a quote into a sales order stays manual. Purchasing and transfer edits are date-only.",
+  "version": "3.6.0",
+  "description": "Connects Claude to the Vision Lighting live Odoo instance \u2014 read everything, plus restricted writes (products, variants, images, pricelists, quotations, project tasks, helpdesk tickets, contacts, open manufacturing orders, and date-only ETA edits on purchase orders, PO lines, transfers and transfer lines) and PDFMonkey datasheet generation. Quotation edits are limited to draft/sent orders; confirming a quote into a sales order stays manual. Manufacturing edits are limited to MOs that are not done or cancelled; marking an MO done stays manual.",
   "author": {
     "name": "Vision Lighting",
     "email": "calebh@visionlighting.net"
   },
   "homepage": "https://github.com/Vision-Lighting/odoo-mcp-connector",
   "documentation": "https://github.com/Vision-Lighting/odoo-mcp-connector",
-  "keywords": ["odoo", "mcp", "erp", "datasheet", "vision-lighting"],
+  "keywords": [
+    "odoo",
+    "mcp",
+    "erp",
+    "datasheet",
+    "vision-lighting"
+  ],
   "server": {
     "type": "node",
     "entry_point": "server/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/index.js"],
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
       "env": {
         "ODOO_MODE": "live_rw",
         "ODOO_URL": "${user_config.live_url}",
@@ -24,7 +32,10 @@
         "ODOO_USERNAME": "${user_config.odoo_username}",
         "ODOO_API_KEY": "${user_config.live_api_key}",
         "PDFMONKEY_API_KEY": "${user_config.pdfmonkey_api_key}",
-        "PDFMONKEY_TEMPLATE_ID": "${user_config.pdfmonkey_template_id}"
+        "PDFMONKEY_TEMPLATE_ID": "${user_config.pdfmonkey_template_id}",
+        "STAGING_URL": "${user_config.staging_url}",
+        "STAGING_DB": "${user_config.staging_db}",
+        "STAGING_API_KEY": "${user_config.staging_api_key}"
       }
     }
   },
@@ -32,7 +43,7 @@
     "odoo_username": {
       "type": "string",
       "title": "Odoo login email",
-      "description": "Your Odoo login email EXACTLY as it appears in Odoo — logins are case-sensitive (e.g. JoshS@... will not work typed as joshs@...). Check Odoo > Settings > My Profile if unsure.",
+      "description": "Your Odoo login email EXACTLY as it appears in Odoo \u2014 logins are case-sensitive (e.g. JoshS@... will not work typed as joshs@...). Check Odoo > Settings > My Profile if unsure.",
       "required": true
     },
     "live_url": {
@@ -66,10 +77,36 @@
       "title": "PDFMonkey template ID (optional)",
       "description": "The PDFMonkey datasheet template ID. Only needed for datasheet generation.",
       "required": false
+    },
+    "staging_url": {
+      "type": "string",
+      "title": "Staging URL",
+      "description": "Odoo.sh staging database URL. Leave blank to disable the staging target entirely.",
+      "required": false,
+      "default": "https://vision-lighting-staging2-36679225.dev.odoo.com"
+    },
+    "staging_db": {
+      "type": "string",
+      "title": "Staging DB",
+      "description": "Staging database name (usually the hostname without the '.dev.odoo.com' suffix).",
+      "required": false,
+      "default": "vision-lighting-staging2-36679225"
+    },
+    "staging_api_key": {
+      "type": "string",
+      "title": "Staging API Key",
+      "description": "Only needed if the staging database wants a different key from live. Odoo.sh staging is a copy of production, so the live key usually works \u2014 leave blank to reuse it.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
     }
   },
   "compatibility": {
-    "platforms": ["win32", "darwin", "linux"],
+    "platforms": [
+      "win32",
+      "darwin",
+      "linux"
+    ],
     "runtimes": {
       "node": ">=18"
     }

@@ -10,15 +10,18 @@
  *   staging  — full access, staging database
  *   live_ro  — read-only, live database
  *   live_rw  — restricted writes (products, quotes, project tasks,
- *              helpdesk tickets, contacts, date-only ETA edits on POs
- *              and transfers), live database
+ *              helpdesk tickets, contacts, open manufacturing orders,
+ *              date-only ETA edits on POs and transfers),
+ *              live database
  */
 
 'use strict';
 
 const readline = require('node:readline');
+const fs = require('node:fs');
+const nodePath = require('node:path');
 
-const SERVER_VERSION = '3.2.0';
+const SERVER_VERSION = '3.6.0';
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
@@ -31,6 +34,45 @@ const ODOO_DB = env('ODOO_DB');
 const ODOO_USERNAME = env('ODOO_USERNAME');
 const ODOO_API_KEY = env('ODOO_API_KEY');
 const MODE = env('ODOO_MODE') || 'live_rw'; // staging | live_ro | live_rw
+
+// Optional second target. Odoo.sh staging is a copy of production, so the
+// username and API key default to the live ones — set STAGING_* only when the
+// staging database wants different credentials.
+const STAGING_URL = env('STAGING_URL').replace(/\/+$/, '');
+const STAGING_DB = env('STAGING_DB');
+const STAGING_USERNAME = env('STAGING_USERNAME') || ODOO_USERNAME;
+const STAGING_API_KEY = env('STAGING_API_KEY') || ODOO_API_KEY;
+const HAS_STAGING = Boolean(STAGING_URL && STAGING_DB);
+
+const TARGETS = {
+  live: { url: ODOO_URL, db: ODOO_DB, username: ODOO_USERNAME, apiKey: ODOO_API_KEY, label: 'live' },
+  staging: { url: STAGING_URL, db: STAGING_DB, username: STAGING_USERNAME, apiKey: STAGING_API_KEY, label: 'staging' },
+};
+
+const { AsyncLocalStorage } = require('node:async_hooks');
+const targetStore = new AsyncLocalStorage();
+
+/** Which database the call in flight is talking to. Defaults to live. */
+function currentTarget() {
+  const store = targetStore.getStore();
+  return (store && store.target) || 'live';
+}
+
+function targetCfg() {
+  const cfg = TARGETS[currentTarget()];
+  if (!cfg || !cfg.url || !cfg.db) {
+    throw new Error(
+      `Target '${currentTarget()}' is not configured. Set STAGING_URL and ` +
+      'STAGING_DB in the extension settings.',
+    );
+  }
+  return cfg;
+}
+
+/** Staging is a scratch database: writes there are not restricted. */
+function isStaging() {
+  return currentTarget() === 'staging';
+}
 
 const PDFMONKEY_API_KEY = env('PDFMONKEY_API_KEY');
 const PDFMONKEY_TEMPLATE_ID = env('PDFMONKEY_TEMPLATE_ID');
@@ -50,17 +92,29 @@ const LIVE_RW_WRITE_MODELS = new Set([
   'product.pricelist.item',
   'helpdesk.ticket',
   'res.partner',
+  'mrp.bom',
   // sale.order / sale.order.line writes are additionally gated by quoteGuard
   // to the quotation stage only (see QUOTE_STATES) — confirmed sales orders
   // are read-only here.
   'sale.order',
   'sale.order.line',
+  // mrp.production / stock.move let the configurator push calculated component
+  // quantities onto an open MO. Gated by productionGuard to MOs that have not
+  // been finished or cancelled (see PRODUCTION_STATES).
+  'mrp.production',
+  'stock.move',
+  // Configurator catalogue: the tool definition and the section/accessory
+  // tables that say what can actually be built. Setup data, not transactional
+  // — vl.configurator.config (one per order line) is deliberately absent.
+  'vl.configurator.tool',
+  'vl.configurator.section',
+  'vl.configurator.accessory',
   // Purchasing ETA updates. These are DATE-ONLY: dateGuard rejects any write
-  // that touches a field outside LIVE_RW_DATE_FIELDS.
+  // that touches a field outside LIVE_RW_DATE_FIELDS (stock.move keeps its
+  // wider MO path above — a date-only move write goes through dateGuard).
   'purchase.order',
   'purchase.order.line',
   'stock.picking',
-  'stock.move',
 ]);
 
 // The only fields live_rw may write on the purchasing/transfer models. Kept to
@@ -81,11 +135,23 @@ const LIVE_RW_CREATE_MODELS = new Set([
   'product.pricelist.item',
   'helpdesk.ticket',
   'res.partner',
+  'mrp.bom',
+  // Adding a component line to an open MO — productionGuard requires the move
+  // to name a parent MO, so this can't be used to create loose stock moves.
+  'stock.move',
+  // Configurator catalogue — see the note on the write list above.
+  'vl.configurator.tool',
+  'vl.configurator.section',
+  'vl.configurator.accessory',
 ]);
 
 // sale.order states that count as an editable "quote". Anything else (sale =
 // confirmed Sales Order, cancel, etc.) is locked down in live_rw mode.
 const QUOTE_STATES = new Set(['draft', 'sent']);
+
+// mrp.production states that are still open to edits. 'done' and 'cancel' are
+// history — never rewrite them.
+const PRODUCTION_STATES = new Set(['draft', 'confirmed', 'progress', 'to_close']);
 
 const MODE_LABELS = {
   staging: '🧪 STAGING',
@@ -99,7 +165,8 @@ const MODE_LABEL = MODE_LABELS[MODE] || MODE;
 let rpcCounter = 0;
 
 async function odooRpc(service, method, args) {
-  const res = await fetch(`${ODOO_URL}/jsonrpc`, {
+  const cfg = targetCfg();
+  const res = await fetch(`${cfg.url}/jsonrpc`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -115,26 +182,40 @@ async function odooRpc(service, method, args) {
   if (data.error) {
     const e = data.error;
     const msg = (e.data && e.data.message) || e.message || JSON.stringify(e);
-    throw new Error(msg);
+    // Odoo puts the Python traceback in data.debug. The last few frames say
+    // where a server-side error came from, which the message alone does not.
+    const tb = e.data && e.data.debug
+      ? String(e.data.debug).trim().split('\n').slice(-8).join('\n')
+      : '';
+    throw new Error(tb ? `${msg}\n--- Odoo traceback (last frames) ---\n${tb}` : msg);
   }
   return data.result;
 }
 
-let cachedUid = null;
+// One cached uid PER TARGET — live and staging are different databases and
+// almost always different user ids, so a single cache would authenticate
+// against one and then act as that uid on the other.
+const cachedUids = Object.create(null);
 
 async function getUid() {
-  if (cachedUid == null) {
-    cachedUid = await odooRpc('common', 'authenticate', [ODOO_DB, ODOO_USERNAME, ODOO_API_KEY, {}]);
-    if (!cachedUid) {
-      throw new Error('Odoo authentication failed. Check URL, DB, username and API key.');
+  const cfg = targetCfg();
+  if (cachedUids[cfg.label] == null) {
+    const uid = await odooRpc('common', 'authenticate', [cfg.db, cfg.username, cfg.apiKey, {}]);
+    if (!uid) {
+      throw new Error(
+        `Odoo authentication failed against ${cfg.label} (${cfg.url}). ` +
+        'Check URL, DB, username and API key.',
+      );
     }
+    cachedUids[cfg.label] = uid;
   }
-  return cachedUid;
+  return cachedUids[cfg.label];
 }
 
 async function execute(model, method, args, kwargs = {}) {
+  const cfg = targetCfg();
   const uid = await getUid();
-  return odooRpc('object', 'execute_kw', [ODOO_DB, uid, ODOO_API_KEY, model, method, args, kwargs]);
+  return odooRpc('object', 'execute_kw', [cfg.db, uid, cfg.apiKey, model, method, args, kwargs]);
 }
 
 const odoo = {
@@ -234,6 +315,60 @@ const odoo = {
   },
 };
 
+// ── Local files ───────────────────────────────────────────────────────────────
+// The schedule tools read files from this machine so their bytes go straight
+// to Odoo instead of through the tool call. Extensions are checked so a typo'd
+// path cannot upload something unintended, and sizes are capped well above
+// any real schedule (the Grafton review page is ~13 MB).
+
+const SCHEDULE_FILE_EXTS = new Set(['.html', '.htm', '.json']);
+const IMAGE_FILE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+// Tells vl_luminaire_schedule which integration made the change, so the line
+// history reads "Edited via claude_desktop_mcp".
+const MCP_CONTEXT = { vl_source_channel: 'claude_desktop_mcp' };
+
+function readLocalFile(rawPath, exts, maxMb) {
+  if (!rawPath) throw new Error('file_path is required.');
+  let p = String(rawPath).trim();
+  if (/^file:\/\//i.test(p)) {
+    p = decodeURIComponent(p.replace(/^file:\/\/\/?/i, ''));
+  }
+  const ext = nodePath.extname(p).toLowerCase();
+  if (exts && !exts.has(ext)) {
+    throw new Error(`Expected ${[...exts].join(' / ')}, got '${ext || 'no extension'}': ${p}`);
+  }
+  let stat;
+  try {
+    stat = fs.statSync(p);
+  } catch {
+    throw new Error(`File not found: ${p}`);
+  }
+  if (!stat.isFile()) throw new Error(`Not a file: ${p}`);
+  if (stat.size > maxMb * 1024 * 1024) throw new Error(`${nodePath.basename(p)} is over ${maxMb} MB.`);
+  const buf = fs.readFileSync(p);
+  return { b64: buf.toString('base64'), name: nodePath.basename(p), bytes: buf.length };
+}
+
+function looksLikeImage(b64) {
+  const raw = Buffer.from(b64.slice(0, 64), 'base64');
+  return (
+    raw.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) ||
+    (raw[0] === 0xff && raw[1] === 0xd8) ||
+    (raw.subarray(0, 4).toString('latin1') === 'RIFF' && raw.subarray(8, 12).toString('latin1') === 'WEBP') ||
+    ['GIF87a', 'GIF89a'].includes(raw.subarray(0, 6).toString('latin1'))
+  );
+}
+
+function stripHtml(html) {
+  return String(html || '')
+    .replace(/<li>/gi, '\n- ')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&rarr;/g, '->')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
 // ── PDFMonkey client ──────────────────────────────────────────────────────────
 
 const PDFMONKEY_BASE = 'https://api.pdfmonkey.io/api/v1';
@@ -321,7 +456,7 @@ function denied(action) {
  *      so a quote can never be confirmed/locked into a Sales Order from here.
  */
 async function quoteGuard(model, ids = null, values = null) {
-  if (MODE !== 'live_rw' || (model !== 'sale.order' && model !== 'sale.order.line')) {
+  if (isStaging() || MODE !== 'live_rw' || (model !== 'sale.order' && model !== 'sale.order.line')) {
     return null;
   }
 
@@ -362,11 +497,73 @@ async function quoteGuard(model, ids = null, values = null) {
   return null;
 }
 
+// Keep MO edits to orders that are still open. A stock.move write is resolved
+// back to its parent MO (raw material or finished goods) and judged on that —
+// a move that belongs to no MO (a plain transfer) is not writable here at all,
+// so inventory moves can't be altered through the configurator path.
+async function productionGuard(model, ids = null, values = null) {
+  if (isStaging() || MODE !== 'live_rw' || (model !== 'mrp.production' && model !== 'stock.move')) {
+    return null;
+  }
+
+  let productionIds = [];
+  if (model === 'mrp.production') {
+    productionIds = [...(ids || [])];
+  } else {
+    if (ids && ids.length) {
+      const moves = await odoo.read('stock.move', [...ids],
+        ['raw_material_production_id', 'production_id', 'reference', 'state']);
+      for (const mv of moves) {
+        const parent = mv.raw_material_production_id || mv.production_id;
+        if (!parent) {
+          return (
+            `stock.move ${mv.reference || mv.id} is not attached to a manufacturing order. ` +
+            `${MODE_LABEL} mode only permits move edits on an open MO.`
+          );
+        }
+        if (mv.state === 'done' || mv.state === 'cancel') {
+          return `stock.move ${mv.reference || mv.id} is '${mv.state}' and cannot be rewritten.`;
+        }
+        productionIds.push(parent[0]);
+      }
+    }
+    if (values && values.raw_material_production_id) productionIds.push(values.raw_material_production_id);
+  }
+
+  if (productionIds.length) {
+    const mos = await odoo.read('mrp.production', [...new Set(productionIds)], ['name', 'state']);
+    for (const mo of mos) {
+      if (!PRODUCTION_STATES.has(mo.state)) {
+        return (
+          `Manufacturing order ${mo.name} (id ${mo.id}) is in state '${mo.state}'. ` +
+          `${MODE_LABEL} mode may only edit open MOs (${[...PRODUCTION_STATES].join(', ')}).`
+        );
+      }
+    }
+  }
+
+  // Don't let a write drive the MO through its workflow — that stays manual.
+  if (model === 'mrp.production' && values && 'state' in values) {
+    return (
+      `Setting mrp.production state to '${values.state}' is not permitted in ` +
+      `${MODE_LABEL} mode — marking an MO done or cancelled stays manual.`
+    );
+  }
+  return null;
+}
+
+/** True when every key being written is one of the model's allowed date fields. */
+function isDateOnlyWrite(model, values) {
+  const allowed = LIVE_RW_DATE_FIELDS[model];
+  const keys = Object.keys(values || {});
+  return Boolean(allowed) && keys.length > 0 && keys.every((k) => allowed.has(k));
+}
+
 // Date-only writes to POs, PO lines, transfers and transfer lines. Rejects any
 // other field, and any record that is cancelled or (for transfers) already
 // done — an arrival that has happened is history, not an ETA.
 async function dateGuard(model, ids = null, values = null) {
-  if (MODE !== 'live_rw' || !LIVE_RW_DATE_FIELDS[model]) return null;
+  if (isStaging() || MODE !== 'live_rw' || !LIVE_RW_DATE_FIELDS[model]) return null;
 
   const allowed = LIVE_RW_DATE_FIELDS[model];
   const bad = Object.keys(values || {}).filter((k) => !allowed.has(k));
@@ -395,7 +592,7 @@ async function dateGuard(model, ids = null, values = null) {
     const recs = await odoo.read(model, [...ids], [label, 'state']);
     for (const r of recs) {
       if (r.state === 'done' || r.state === 'cancel') {
-        return `${model} ${r[label] || r.id} is '${r.state}' — its dates cannot be changed here.`;
+        return `${model} ${r.name || r.reference || r.id} is '${r.state}' — its dates cannot be changed here.`;
       }
     }
   }
@@ -420,8 +617,8 @@ const MODEL_URL_PATHS = {
 
 function recordUrl(model, recordId) {
   const pattern = MODEL_URL_PATHS[model];
-  if (pattern) return `${ODOO_URL}${pattern.replace('{id}', recordId)}`;
-  return `${ODOO_URL}/web#model=${model}&id=${recordId}&view_type=form`;
+  if (pattern) return `${targetCfg().url}${pattern.replace('{id}', recordId)}`;
+  return `${targetCfg().url}/web#model=${model}&id=${recordId}&view_type=form`;
 }
 
 function withUrl(record, model) {
@@ -442,7 +639,7 @@ const READ_TOOLS = [
   {
     name: 'odoo_ping',
     description:
-      `Test the Odoo connection. Current mode: ${MODE_LABEL} | DB: ${ODOO_DB} | URL: ${ODOO_URL}`,
+      `Test the Odoo connection. Current mode: ${MODE_LABEL} | DB: ${ODOO_DB} | URL: ${targetCfg().url}`,
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -560,7 +757,7 @@ const WRITE_TOOLS = [
           'quotation stage (draft/sent); confirmed sales orders are read-only ' +
           'and quotes cannot be confirmed into sales orders here. ' +
           'purchase.order, purchase.order.line, stock.picking and stock.move ' +
-          'are DATE-ONLY: ' +
+          '(outside an open MO) are DATE-ONLY: ' +
           Object.entries(LIVE_RW_DATE_FIELDS)
             .map(([m, f]) => `${m} [${[...f].join(', ')}]`).join('; ') +
           ' — not on cancelled POs or done/cancelled transfers.'
@@ -814,9 +1011,78 @@ const STAGING_ONLY_TOOLS = [
       required: ['picking_id', 'batches'],
     },
   },
+  // Luminaire schedules (vl_luminaire_schedule). Staging-only until the module
+  // is installed on live. Each of these moves file bytes itself - reading a
+  // local file or downloading a link - so an image or a whole schedule never
+  // has to be written out inside the tool call.
+  {
+    name: 'schedule_import_file',
+    description:
+      '[🧪 STAGING] File a comparison record as a luminaire schedule, images included. ' +
+      'Pass the local path to the review .html (render_html.py output - carries every image) ' +
+      'or the .comparison.json (imports without images). mode "create" makes a new schedule; ' +
+      'mode "images" adds the specified images to an existing schedule_id, matching lines on legend.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Local path (or file:// URL) to the .html or .comparison.json' },
+        mode: { type: 'string', enum: ['create', 'images'], default: 'create' },
+        schedule_id: { type: 'integer', description: 'Required for mode "images"' },
+        schedule_type: { type: 'string', enum: ['comparison', 'vision_specified', 'specifier_built'], default: 'comparison' },
+        overwrite_images: { type: 'boolean', default: false, description: 'mode "images": replace images lines already have' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'schedule_set_image',
+    description:
+      '[🧪 STAGING] Set the specified image on one luminaire-schedule line from a web link or a ' +
+      'local file. The connector fetches or reads it. SharePoint links need a login and will not ' +
+      'download - use the synced local path instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        line_id: { type: 'integer' },
+        image_url: { type: 'string' },
+        file_path: { type: 'string' },
+      },
+      required: ['line_id'],
+    },
+  },
+  {
+    name: 'schedule_add_source_document',
+    description:
+      '[🧪 STAGING] Attach a source document to a luminaire schedule - normally the specified ' +
+      'luminaire schedule it was built against (is_basis true). Prefer url (the SharePoint link, ' +
+      'one copy of record); file_path uploads a local file instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        schedule_id: { type: 'integer' },
+        name: { type: 'string', description: 'Short label, e.g. LUMINAIRE SCHEDULE' },
+        role: {
+          type: 'string',
+          enum: ['specified_schedule', 'specification', 'drawing', 'take_off', 'email', 'other'],
+          default: 'specified_schedule',
+        },
+        revision: { type: 'string' },
+        issued_on: { type: 'string', description: 'YYYY-MM-DD' },
+        url: { type: 'string' },
+        reference: { type: 'string', description: 'Drawing number or path as recorded' },
+        file_path: { type: 'string' },
+        is_basis: { type: 'boolean', default: false },
+      },
+      required: ['schedule_id', 'name'],
+    },
+  },
 ];
 
-// Build final tool list for this mode
+// Build final tool list for this mode.
+// MODE still decides what may be done to LIVE — configuring a staging database
+// must never widen live access, so the staging-only tools are appended without
+// disturbing the mode's own tool set. Each of them then refuses any call that
+// does not name target 'staging'.
 let ALL_TOOLS;
 if (MODE === 'staging') {
   ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, ...DATASHEET_TOOLS, ...STAGING_ONLY_TOOLS];
@@ -826,7 +1092,34 @@ if (MODE === 'staging') {
   // live_ro
   ALL_TOOLS = [...READ_TOOLS, ...DATASHEET_TOOLS];
 }
+if (HAS_STAGING && MODE !== 'staging') {
+  // Only the staging-only tools are added. Write tools are deliberately NOT
+  // granted to a live_ro install just because staging exists: their guards key
+  // off MODE === 'live_rw', so in live_ro they would wave a live write through
+  // as well. Read-only stays read-only, on both databases.
+  ALL_TOOLS = [...ALL_TOOLS, ...STAGING_ONLY_TOOLS];
+}
+// Every tool takes an optional target once a staging database is configured.
+// Declared here rather than on 40 individual schemas so the two can never
+// drift apart.
+if (HAS_STAGING) {
+  const TARGET_PROP = {
+    type: 'string',
+    enum: ['live', 'staging'],
+    default: 'live',
+    description:
+      "Which database to act on. 'live' is production (restricted writes); " +
+      "'staging' is the staging copy and is unrestricted. Defaults to live, " +
+      'so a staging action must ask for it explicitly.',
+  };
+  for (const tool of ALL_TOOLS) {
+    if (!tool.inputSchema) tool.inputSchema = { type: 'object', properties: {} };
+    if (!tool.inputSchema.properties) tool.inputSchema.properties = {};
+    tool.inputSchema.properties.target = TARGET_PROP;
+  }
+}
 const ALLOWED_TOOL_NAMES = new Set(ALL_TOOLS.map((t) => t.name));
+const STAGING_ONLY_TOOL_NAMES = new Set(STAGING_ONLY_TOOLS.map((t) => t.name));
 
 // ── Datasheet helpers ─────────────────────────────────────────────────────────
 
@@ -1004,13 +1297,16 @@ async function dispatch(name, args) {
     const version = await odooRpc('common', 'version', []);
     const uid = await getUid();
     const user = await odoo.read('res.users', [uid], ['name', 'login', 'company_id']);
+    const cfg = targetCfg();
     return ok({
-      mode: MODE_LABEL,
+      target: cfg.label,
+      mode: isStaging() ? '\u{1F9EA} STAGING (full access)' : MODE_LABEL,
       server_version: version,
       uid,
       user,
-      db: ODOO_DB,
-      url: ODOO_URL,
+      db: cfg.db,
+      url: cfg.url,
+      staging_configured: HAS_STAGING,
     });
   }
 
@@ -1072,13 +1368,14 @@ async function dispatch(name, args) {
   // ── Write tools ─────────────────────────────────────────────────────────────
   if (name === 'odoo_create') {
     const model = args.model;
-    if (MODE === 'live_rw' && !LIVE_RW_CREATE_MODELS.has(model)) {
+    if (!isStaging() && MODE === 'live_rw' && !LIVE_RW_CREATE_MODELS.has(model)) {
       return err(
         `Cannot create '${model}' in ${MODE_LABEL} mode. ` +
         `Allowed: ${[...LIVE_RW_CREATE_MODELS].sort().join(', ')}`,
       );
     }
-    const guardErr = await quoteGuard(model, null, args.values);
+    const guardErr = (await quoteGuard(model, null, args.values))
+                  || (await productionGuard(model, null, args.values));
     if (guardErr) return err(guardErr);
     const newId = await odoo.create(model, args.values);
     return ok({ id: newId, model, url: recordUrl(model, newId) });
@@ -1086,14 +1383,19 @@ async function dispatch(name, args) {
 
   if (name === 'odoo_write') {
     const model = args.model;
-    if (MODE === 'live_rw' && !LIVE_RW_WRITE_MODELS.has(model)) {
+    if (!isStaging() && MODE === 'live_rw' && !LIVE_RW_WRITE_MODELS.has(model)) {
       return err(
         `Cannot write to '${model}' in ${MODE_LABEL} mode. ` +
         `Allowed: ${[...LIVE_RW_WRITE_MODELS].sort().join(', ')}`,
       );
     }
-    const guardErr = (await quoteGuard(model, args.ids, args.values))
-                  || (await dateGuard(model, args.ids, args.values));
+    // A date-only stock.move write is an ETA update and may land on a receipt
+    // or delivery line; anything wider on a move stays on the MO-only path.
+    const guardErr = (model === 'stock.move' && isDateOnlyWrite(model, args.values))
+      ? await dateGuard(model, args.ids, args.values)
+      : (await quoteGuard(model, args.ids, args.values))
+        || (await productionGuard(model, args.ids, args.values))
+        || (model !== 'stock.move' ? await dateGuard(model, args.ids, args.values) : null);
     if (guardErr) return err(guardErr);
     const okFlag = await odoo.write(model, args.ids, args.values);
     return ok({
@@ -1263,6 +1565,91 @@ async function dispatch(name, args) {
   }
 
   // ── Staging-only tools ──────────────────────────────────────────────────────
+  if (name === 'schedule_import_file') {
+    const file = readLocalFile(args.file_path, SCHEDULE_FILE_EXTS, 80);
+    const mode = args.mode === 'images' ? 'images' : 'create';
+    if (mode === 'images' && !args.schedule_id) return err('mode "images" needs schedule_id.');
+    const vals = {
+      file: file.b64,
+      filename: file.name,
+      mode,
+      schedule_type: args.schedule_type || 'comparison',
+      overwrite_images: Boolean(args.overwrite_images),
+    };
+    if (args.schedule_id) vals.schedule_id = args.schedule_id;
+    const wizardId = await odoo.create('vl.luminaire.schedule.import', vals);
+    const action = await odoo.call('vl.luminaire.schedule.import', 'action_import', [wizardId]);
+    const scheduleId = action && action.res_id;
+    if (!scheduleId) return err('The import ran but did not say which schedule it filed.');
+    const [schedule] = await odoo.read('vl.luminaire.schedule', [scheduleId], ['name', 'line_count']);
+    // The import writes its own summary - lines, images, anything it could not
+    // match - to the schedule's chatter. Hand that back rather than re-deriving it.
+    const [note] = await odoo.searchRead(
+      'mail.message',
+      // message_post files a note as a 'notification', not a 'comment' -
+      // match on the model and record and take the newest with a body.
+      [['model', '=', 'vl.luminaire.schedule'], ['res_id', '=', scheduleId], ['body', '!=', false]],
+      { fields: ['body'], limit: 1, order: 'id desc' },
+    );
+    return ok({
+      success: true,
+      schedule_id: scheduleId,
+      name: schedule && schedule.name,
+      lines: schedule && schedule.line_count,
+      file: file.name,
+      size_kb: Math.round(file.bytes / 1024),
+      summary: note ? stripHtml(note.body) : '',
+      url: recordUrl('vl.luminaire.schedule', scheduleId),
+      review_url: `${targetCfg().url}/vl/luminaire_schedule/${scheduleId}/review`,
+    });
+  }
+
+  if (name === 'schedule_set_image') {
+    let b64;
+    let from;
+    if (args.file_path) {
+      const file = readLocalFile(args.file_path, IMAGE_FILE_EXTS, 15);
+      b64 = file.b64;
+      from = file.name;
+    } else if (args.image_url) {
+      b64 = await odoo.encodeImageFromUrl(args.image_url);
+      from = args.image_url;
+    } else {
+      return err('Provide image_url or file_path.');
+    }
+    if (!looksLikeImage(b64)) {
+      return err(`${from} is not an image (a SharePoint link returns its login page - use the local path).`);
+    }
+    await execute('vl.luminaire.schedule.line', 'write', [[args.line_id], { specified_image: b64 }],
+      { context: MCP_CONTEXT });
+    return ok({ success: true, line_id: args.line_id, from, url: recordUrl('vl.luminaire.schedule.line', args.line_id) });
+  }
+
+  if (name === 'schedule_add_source_document') {
+    const kwargs = {
+      schedule_id: args.schedule_id,
+      name: args.name,
+      role: args.role || 'specified_schedule',
+      revision: args.revision || null,
+      issued_on: args.issued_on || null,
+      url: args.url || null,
+      reference: args.reference || null,
+      is_basis: Boolean(args.is_basis),
+    };
+    if (args.file_path) {
+      const file = readLocalFile(args.file_path, null, 40);
+      kwargs.file_base64 = file.b64;
+      kwargs.filename = file.name;
+    }
+    if (!kwargs.url && !kwargs.file_base64) {
+      return err('Provide url (preferred) or file_path, so the document can be opened from the schedule.');
+    }
+    const docId = await execute('vl.luminaire.schedule', 'add_source_document', [[]],
+      { ...kwargs, context: MCP_CONTEXT });
+    return ok({ success: true, document_id: docId, schedule_id: args.schedule_id,
+      url: recordUrl('vl.luminaire.schedule', args.schedule_id) });
+  }
+
   if (name === 'odoo_call') {
     return ok(await odoo.call(args.model, args.method, args.ids, args.kwargs || {}));
   }
@@ -1332,7 +1719,17 @@ async function handleRequest(msg) {
     const args = (params && params.arguments) || {};
     try {
       if (!ALLOWED_TOOL_NAMES.has(name)) return denied(name);
-      return await dispatch(name, args);
+      const target = args.target === 'staging' ? 'staging' : 'live';
+      if (target === 'staging' && !HAS_STAGING) {
+        return err('No staging database is configured. Set STAGING_URL and '
+                 + 'STAGING_DB in the extension settings, then restart Claude.');
+      }
+      // Staging-only tools stay staging-only even though they are now listed.
+      if (target !== 'staging' && STAGING_ONLY_TOOL_NAMES.has(name)) {
+        return err(`Tool '${name}' may only be used with target 'staging'.`);
+      }
+      const { target: _omit, ...rest } = args;
+      return await targetStore.run({ target }, () => dispatch(name, rest));
     } catch (e) {
       return err(`${e && e.message ? e.message : e}\n\n${e && e.stack ? e.stack : ''}`);
     }
