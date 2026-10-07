@@ -12,7 +12,8 @@
  *   live_rw  — restricted writes (products, quotes, project tasks,
  *              luminaire schedules,
  *              helpdesk tickets, contacts, open manufacturing orders,
- *              date-only ETA edits on POs and transfers),
+ *              date-only ETA edits on POs and transfers,
+ *              invoice forecasts on quotes and orders),
  *              live database
  */
 
@@ -22,7 +23,7 @@ const readline = require('node:readline');
 const fs = require('node:fs');
 const nodePath = require('node:path');
 
-const SERVER_VERSION = '3.6.0';
+const SERVER_VERSION = '3.8.0';
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
@@ -921,6 +922,37 @@ const WRITE_TOOLS = [
       },
     },
   },
+  {
+    name: 'forecast_set',
+    description:
+      `[${MODE_LABEL}] Set a sales order's invoice forecast (vl_invoice_forecast). ` +
+      "Works on quotes AND confirmed orders - it only ever touches the order's forecast_mode " +
+      'and its invoice.forecast.line rows, nothing else on the order. ' +
+      "mode: 'manual' (forecast typed by month), 'delivery' (follow deliveries - confirmed " +
+      "orders only; the module rebuilds the lines itself), 'none' (out of the forecast). " +
+      "months: {'YYYY-MM': amount ex-GST} - switches the order to manual if it is not already. " +
+      'replace (default true): current/future months NOT listed are cleared, so the months given ' +
+      'are the whole remaining forecast. lock_history (default true): past months are set to ' +
+      'exactly what was invoiced in them, so no On Order shows in the past. Months before the ' +
+      'current one may only be given explicitly with allow_past. Returns the lines before and ' +
+      'after, and what is left unforecast.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        order_id: { type: 'integer', description: 'sale.order id' },
+        order_name: { type: 'string', description: 'Or the order reference, e.g. S00896' },
+        mode: { type: 'string', enum: ['manual', 'delivery', 'none'] },
+        months: {
+          type: 'object',
+          description: "Forecast by month, e.g. {'2026-10': 70000, '2026-11': 166670}",
+          additionalProperties: { type: 'number' },
+        },
+        replace: { type: 'boolean', default: true },
+        lock_history: { type: 'boolean', default: true },
+        allow_past: { type: 'boolean', default: false },
+      },
+    },
+  },
 ];
 
 // --- Datasheet tool (all modes — read-only operation) ---
@@ -1538,6 +1570,137 @@ async function dispatch(name, args) {
       fields: ['id', 'product_id', 'product_uom_qty', 'price_unit', 'price_subtotal', 'name'],
     });
     return ok({ ...changes, order, lines });
+  }
+
+  if (name === 'forecast_set') {
+    // Bypasses quoteGuard on purpose: the forecast is planning data, not the
+    // order itself. Only forecast_mode on sale.order and the order's own
+    // invoice.forecast.line rows are written.
+    let orders = [];
+    if (args.order_id) {
+      orders = await odoo.read('sale.order', [args.order_id], ['name', 'state', 'forecast_mode']);
+    } else if (args.order_name) {
+      orders = await odoo.searchRead('sale.order', [['name', '=', args.order_name]], {
+        fields: ['name', 'state', 'forecast_mode'], limit: 2,
+      });
+    } else {
+      return err('Give order_id or order_name.');
+    }
+    if (orders.length !== 1) return err(`Sale order ${args.order_id || args.order_name} not found.`);
+    const order = orders[0];
+    if (order.state === 'cancel') return err(`${order.name} is cancelled.`);
+
+    const months = args.months || null;
+    const mode = args.mode || (months ? 'manual' : null);
+    if (months && mode !== 'manual') {
+      return err("months can only be set on a manual forecast - leave mode out or set it to 'manual'.");
+    }
+    if (mode === 'delivery' && order.state !== 'sale') {
+      return err(`${order.name} is a quotation - it has no deliveries to follow. Use manual.`);
+    }
+    if (!mode && args.lock_history === undefined) {
+      return err('Nothing to do - give mode and/or months.');
+    }
+
+    // Month keys as the 1st of the month; "current" is Sydney time.
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+    const thisMonth = `${today.slice(0, 7)}-01`;
+    const toMonth = (key) => {
+      const m = /^(\d{4})-(\d{2})(?:-\d{2})?$/.exec(String(key).trim());
+      return m ? `${m[1]}-${m[2]}-01` : null;
+    };
+    const wanted = {};
+    if (months) {
+      for (const [key, amount] of Object.entries(months)) {
+        const month = toMonth(key);
+        if (!month) return err(`Bad month '${key}' - use YYYY-MM.`);
+        if (typeof amount !== 'number' || !Number.isFinite(amount)) return err(`Bad amount for ${key}.`);
+        if (month < thisMonth && !args.allow_past) {
+          return err(`${key} is in the past. Past months follow what was invoiced; pass allow_past to override.`);
+        }
+        wanted[month] = Math.round(amount * 100) / 100;
+      }
+    }
+
+    const LINE_FIELDS = ['forecast_month', 'forecast_amount', 'actual_amount', 'delivered_uninvoiced'];
+    const readLines = () => odoo.searchRead('invoice.forecast.line', [['order_id', '=', order.id]], {
+      fields: LINE_FIELDS, limit: 500, order: 'forecast_month',
+    });
+    const before = await readLines();
+
+    if (mode && mode !== order.forecast_mode) {
+      // On a quote the form shows forecast_mode_quote; writing forecast_mode
+      // directly is equivalent (that field's inverse just copies it across).
+      await odoo.write('sale.order', [order.id], { forecast_mode: mode });
+    }
+
+    const changes = [];
+    const effectiveMode = mode || order.forecast_mode;
+    if (effectiveMode === 'manual') {
+      const lines = await readLines();
+      const byMonth = Object.fromEntries(lines.map((l) => [l.forecast_month, l]));
+      const toUnlink = [];
+      for (const [month, amount] of Object.entries(wanted)) {
+        const line = byMonth[month];
+        if (line) {
+          if (Math.abs(line.forecast_amount - amount) >= 0.005) {
+            await odoo.write('invoice.forecast.line', [line.id], { forecast_amount: amount });
+            changes.push({ month, from: line.forecast_amount, to: amount });
+          }
+        } else if (amount) {
+          await odoo.create('invoice.forecast.line', {
+            order_id: order.id, forecast_month: month, forecast_amount: amount,
+          });
+          changes.push({ month, from: null, to: amount });
+        }
+      }
+      for (const line of lines) {
+        const month = line.forecast_month;
+        if (month in wanted) continue;
+        if (month >= thisMonth) {
+          if (months && args.replace !== false && line.forecast_amount) {
+            // Keep a line that carries an actual or a delivered-not-invoiced
+            // figure (the report needs it); drop an empty one.
+            if (line.actual_amount || line.delivered_uninvoiced) {
+              await odoo.write('invoice.forecast.line', [line.id], { forecast_amount: 0 });
+            } else {
+              toUnlink.push(line.id);
+            }
+            changes.push({ month, from: line.forecast_amount, to: 0 });
+          }
+        } else if (args.lock_history !== false) {
+          const invoiced = Math.max(line.actual_amount || 0, 0);
+          if (Math.abs(line.forecast_amount - invoiced) >= 0.005) {
+            await odoo.write('invoice.forecast.line', [line.id], { forecast_amount: invoiced });
+            changes.push({ month, from: line.forecast_amount, to: invoiced, note: 'history locked to invoiced' });
+          }
+        }
+      }
+      if (toUnlink.length) await odoo.unlink('invoice.forecast.line', toUnlink);
+    } else if (months) {
+      return err(`${order.name} is not on a manual forecast.`);
+    }
+
+    const after = await readLines();
+    const [totals] = await odoo.read('sale.order', [order.id],
+      ['forecast_mode', 'amount_untaxed', 'forecast_unallocated']);
+    const brief = (ls) => ls.map((l) => ({
+      month: l.forecast_month.slice(0, 7),
+      forecast: l.forecast_amount,
+      actual: l.actual_amount,
+      delivered_not_invoiced: l.delivered_uninvoiced,
+    }));
+    return ok({
+      order: order.name,
+      _url: recordUrl('sale.order', order.id),
+      mode_before: order.forecast_mode,
+      mode_after: totals.forecast_mode,
+      changes,
+      lines_before: brief(before),
+      lines_after: brief(after),
+      order_untaxed: totals.amount_untaxed,
+      unforecast: totals.forecast_unallocated,
+    });
   }
 
   if (name === 'task_upsert') {
